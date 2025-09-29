@@ -193,6 +193,14 @@ def test_rollback_restores_previous_snapshot(client: TestClient, captured_events
     snapshot_layout = json.loads((snapshots[0] / "layout.json").read_text(encoding="utf-8"))
     assert snapshot_layout == layout_first
 
+    list_response = client.get("/api/upload/esp-000/snapshots")
+    assert list_response.status_code == 200
+    listing = list_response.json()
+    assert len(listing) == 1
+    assert listing[0]["name"] == snapshots[0].name
+    assert "layout.json" in listing[0]["files"]
+    assert listing[0]["hashes"]["layout"] is not None
+
     rollback = client.post(
         "/api/upload/esp-000/rollback",
         json={"actor": "operator"},
@@ -228,6 +236,13 @@ def test_rollback_restores_previous_snapshot(client: TestClient, captured_events
         "config.uploaded",
         "config.rollback",
     ]
+
+    post_list = client.get("/api/upload/esp-000/snapshots")
+    assert post_list.status_code == 200
+    post_listing = post_list.json()
+    assert len(post_listing) == 2
+    names = [entry["name"] for entry in post_listing]
+    assert snapshots[0].name in names
 
 
 def test_rollback_requires_snapshot(client: TestClient) -> None:

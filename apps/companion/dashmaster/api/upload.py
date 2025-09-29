@@ -64,6 +64,15 @@ class RollbackRequest(BaseModel):
     actor: str | None = None
 
 
+class RollbackSnapshot(BaseModel):
+    """Snapshot metadata returned to clients."""
+
+    name: str
+    created_at: datetime
+    files: list[str]
+    hashes: dict[str, str | None]
+
+
 class RollbackResponse(BaseModel):
     """Response returned after completing a rollback."""
 
@@ -380,6 +389,26 @@ def _overwrite_storage_from_snapshot(storage_dir: Path, files: dict[str, bytes])
         (storage_dir / filename).write_bytes(content)
 
 
+def _gather_snapshots(storage_dir: Path) -> list[RollbackSnapshot]:
+    history_dir = storage_dir / "history"
+    if not history_dir.exists():
+        return []
+    snapshots: list[RollbackSnapshot] = []
+    for path in sorted([p for p in history_dir.iterdir() if p.is_dir()]):
+        files = _load_snapshot_files(path)
+        hashes = _collect_hashes_from_files(files)
+        created_at = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
+        snapshots.append(
+            RollbackSnapshot(
+                name=path.name,
+                created_at=created_at,
+                files=sorted(files.keys()),
+                hashes=hashes,
+            )
+        )
+    return snapshots
+
+
 @router.post("/upload/{hostname}/rollback", response_model=RollbackResponse)
 async def rollback_config_pack(
     hostname: str,
@@ -454,3 +483,11 @@ async def rollback_config_pack(
         rollback=snapshot_dir.name,
         hashes=result["hashes"],
     )
+
+
+@router.get("/upload/{hostname}/snapshots", response_model=list[RollbackSnapshot])
+async def list_snapshots(hostname: str) -> list[RollbackSnapshot]:
+    """Return available rollback snapshots for a device."""
+
+    storage_dir = await to_thread(_ensure_storage_dir, hostname)
+    return await to_thread(_gather_snapshots, storage_dir)
