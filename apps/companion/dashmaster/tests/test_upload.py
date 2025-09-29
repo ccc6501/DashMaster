@@ -153,7 +153,7 @@ def test_upload_rejects_missing_ttl(client: TestClient) -> None:
     assert "ttl" in response.json()["detail"].lower()
 
 
-def test_upload_creates_rollback_snapshot(client: TestClient) -> None:
+def test_rollback_restores_previous_snapshot(client: TestClient, captured_events) -> None:
     layout_first = {
         "version": "1.0",
         "widgets": ["initial"],
@@ -193,7 +193,61 @@ def test_upload_creates_rollback_snapshot(client: TestClient) -> None:
     snapshot_layout = json.loads((snapshots[0] / "layout.json").read_text(encoding="utf-8"))
     assert snapshot_layout == layout_first
 
+    rollback = client.post(
+        "/api/upload/esp-000/rollback",
+        json={"actor": "operator"},
+    )
+    assert rollback.status_code == 200
+    rollback_payload = rollback.json()
+    assert rollback_payload["device"] == "esp-000"
+    assert rollback_payload["rollback"] == snapshots[0].name
+
+    device_storage = STORAGE_DIR / "esp-000"
+    restored_layout = json.loads((device_storage / "layout.json").read_text(encoding="utf-8"))
+    assert restored_layout == layout_first
+    restored_rules = json.loads((device_storage / "rules.json").read_text(encoding="utf-8"))
+    assert restored_rules == rules_first
+    emulator_layout = json.loads((EMU_STORAGE / "layout.json").read_text(encoding="utf-8"))
+    assert emulator_layout == layout_first
+    emulator_rules = json.loads((EMU_STORAGE / "rules.json").read_text(encoding="utf-8"))
+    assert emulator_rules == rules_first
+
     with SessionFactory() as session:
-        entries = session.execute(select(ConfigHistory).order_by(ConfigHistory.created_at)).scalars().all()
-        assert len(entries) == 2
-        assert entries[1].note is not None
+        entries = (
+            session.execute(select(ConfigHistory).order_by(ConfigHistory.created_at))
+            .scalars()
+            .all()
+        )
+        assert len(entries) == 3
+        assert entries[-1].note is not None
+        assert "rolled_back_to" in entries[-1].note
+
+    event_types = [event[0] for event in captured_events]
+    assert event_types == [
+        "config.uploaded",
+        "config.uploaded",
+        "config.rollback",
+    ]
+
+
+def test_rollback_requires_snapshot(client: TestClient) -> None:
+    layout = {
+        "version": "1.0",
+        "widgets": [],
+    }
+    rules = {
+        "version": "1.0",
+        "actuators": [],
+    }
+
+    response = client.post(
+        "/api/upload/esp-000",
+        files={
+            "layout": ("layout.json", json.dumps(layout), "application/json"),
+            "rules": ("rules.json", json.dumps(rules), "application/json"),
+        },
+    )
+    assert response.status_code == 200
+
+    rollback = client.post("/api/upload/esp-000/rollback")
+    assert rollback.status_code == 404
