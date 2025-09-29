@@ -2,14 +2,19 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 from asyncio import to_thread
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
 from sqlalchemy import select
 
 from ..core.events import bus
+from ..core.http_client import create_device_client
 from ..store.database import SessionFactory
 from ..store.models import ConfigHistory, Device, DeviceBirth
 from ..util.hashing import sha256_bytes
@@ -17,7 +22,8 @@ from ..util.schema import SchemaValidationError, validate
 
 router = APIRouter(tags=["upload"])
 
-_STORAGE_ROOT = Path(__file__).resolve().parents[3] / "var" / "device_storage"
+_DEFAULT_STORAGE_ROOT = Path(__file__).resolve().parents[4] / "var" / "device_storage"
+_STORAGE_ROOT = Path(os.getenv("DASHMASTER_STORAGE_ROOT", str(_DEFAULT_STORAGE_ROOT)))
 
 
 async def _read_json(file: UploadFile, *, schema_name: str) -> tuple[dict[str, Any], str]:
@@ -102,35 +108,77 @@ async def upload_config_pack(
     if theme is not None:
         theme_text, theme_sha = await _read_text(theme)
 
+    device_info = await to_thread(_get_device_info, hostname)
+
+    storage_dir = await to_thread(_ensure_storage_dir, hostname)
+
+    files_to_write: dict[str, bytes] = {
+        "layout.json": json.dumps(layout_json, indent=2).encode("utf-8"),
+        "rules.json": json.dumps(rules_json, indent=2).encode("utf-8"),
+        **(
+            {"schema.json": json.dumps(schema_json, indent=2).encode("utf-8")}
+            if schema_json is not None
+            else {}
+        ),
+        **(
+            {"calibration.json": json.dumps(calibration_json, indent=2).encode("utf-8")}
+            if calibration_json is not None
+            else {}
+        ),
+        **(
+            {"board_map.json": json.dumps(board_map_json, indent=2).encode("utf-8")}
+            if board_map_json is not None
+            else {}
+        ),
+        **({"theme.css": theme_text.encode("utf-8")} if theme_text is not None else {}),
+    }
+
+    device_requests: list[tuple[str, str, Any]] = [
+        ("/api/layout", "json", layout_json),
+        ("/api/rules", "json", rules_json),
+    ]
+    if schema_json is not None:
+        device_requests.append(("/api/schema", "json", schema_json))
+    if calibration_json is not None:
+        device_requests.append(("/api/calibration", "json", calibration_json))
+    if board_map_json is not None:
+        device_requests.append(("/api/board_map", "json", board_map_json))
+    if theme_text is not None:
+        device_requests.append(("/api/theme", "bytes", theme_text.encode("utf-8")))
+
+    try:
+        async with create_device_client(
+            hostname=hostname,
+            http_port=device_info["http_port"],
+        ) as client:
+            for path, payload_type, payload in device_requests:
+                if payload_type == "json":
+                    response = await client.post_json(path, payload)
+                else:
+                    response = await client.post_bytes(path, payload, "text/css")
+                if response.status_code >= 400:
+                    raise HTTPException(
+                        status_code=status.HTTP_502_BAD_GATEWAY,
+                        detail=f"Device responded with {response.status_code} at {path}",
+                    )
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to reach device {hostname}: {exc}",
+        ) from exc
+
+    snapshot_label = await to_thread(
+        _snapshot_previous_pack,
+        storage_dir,
+        set(files_to_write.keys()),
+    )
+
     storage_dir = await to_thread(_ensure_storage_dir, hostname)
 
     await to_thread(
         _write_files,
         storage_dir,
-        {
-            "layout.json": json.dumps(layout_json, indent=2).encode("utf-8"),
-            "rules.json": json.dumps(rules_json, indent=2).encode("utf-8"),
-            **(
-                {"schema.json": json.dumps(schema_json, indent=2).encode("utf-8")}
-                if schema_json is not None
-                else {}
-            ),
-            **(
-                {"calibration.json": json.dumps(calibration_json, indent=2).encode("utf-8")}
-                if calibration_json is not None
-                else {}
-            ),
-            **(
-                {"board_map.json": json.dumps(board_map_json, indent=2).encode("utf-8")}
-                if board_map_json is not None
-                else {}
-            ),
-            **(
-                {"theme.css": theme_text.encode("utf-8")}
-                if theme_text is not None
-                else {}
-            ),
-        },
+        files_to_write,
     )
 
     def _record() -> dict[str, Any]:
@@ -153,6 +201,11 @@ async def upload_config_pack(
                 board_map_sha=board_map_sha,
                 theme_sha=theme_sha,
                 actor=actor,
+                note=(
+                    json.dumps({"rollback": snapshot_label})
+                    if snapshot_label is not None
+                    else None
+                ),
             )
             session.add(history)
 
@@ -182,6 +235,7 @@ async def upload_config_pack(
             birth_json = dict(birth.json)
             birth_json["configs"] = configs
             birth.json = birth_json
+            birth.sha256 = sha256_bytes(json.dumps(birth_json, sort_keys=True).encode("utf-8"))
             session.add(birth)
             session.commit()
             return {
@@ -204,3 +258,32 @@ async def upload_config_pack(
 def _write_files(target: Path, files: dict[str, bytes]) -> None:
     for name, content in files.items():
         (target / name).write_bytes(content)
+
+
+def _get_device_info(hostname: str) -> dict[str, Any]:
+    with SessionFactory() as session:
+        device = (
+            session.execute(select(Device).where(Device.hostname == hostname)).scalars().first()
+        )
+        if device is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Device not found",
+            )
+        return {"id": device.id, "http_port": device.http_port}
+
+
+def _snapshot_previous_pack(target: Path, filenames: set[str]) -> str | None:
+    existing = [name for name in filenames if (target / name).exists()]
+    if not existing:
+        return None
+
+    history_dir = target / "history"
+    history_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+    snapshot_dir = history_dir / timestamp
+    snapshot_dir.mkdir(exist_ok=True)
+    for name in existing:
+        src = target / name
+        shutil.copy2(src, snapshot_dir / name)
+    return snapshot_dir.name

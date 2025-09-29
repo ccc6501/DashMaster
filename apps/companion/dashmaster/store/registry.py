@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from .models import Device
 
-_REGISTRY_PATH = Path(__file__).resolve().parents[3] / "reservations" / "registry.json"
+_REGISTRY_PATH = Path(__file__).resolve().parents[4] / "reservations" / "registry.json"
 
 
 def load_registry() -> dict:

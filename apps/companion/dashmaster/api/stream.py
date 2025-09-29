@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 
 from fastapi import APIRouter
 from sse_starlette.sse import EventSourceResponse
@@ -24,7 +24,7 @@ async def stream_events() -> EventSourceResponse:
                     event = await queue.get()
                 except asyncio.CancelledError:  # pragma: no cover - connection closed
                     break
-                payload = event.payload | {"ts": datetime.utcnow().isoformat()}
+                payload = event.payload | {"ts": datetime.now(UTC).isoformat()}
                 yield {
                     "event": event.type,
                     "data": json.dumps(payload),

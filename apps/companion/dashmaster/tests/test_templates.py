@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from ...util.schema import validate
+from ..util.schema import validate
 
-TEMPLATE_DIR = Path(__file__).resolve().parents[3] / "templates"
+TEMPLATE_DIR = Path(__file__).resolve().parents[4] / "templates"
 
 
 @pytest.mark.parametrize(

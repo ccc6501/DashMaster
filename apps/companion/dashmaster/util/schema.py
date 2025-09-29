@@ -7,7 +7,7 @@ from typing import Any
 
 from jsonschema import Draft202012Validator, ValidationError
 
-_SCHEMA_DIR = Path(__file__).resolve().parents[3] / "templates" / "$schema"
+_SCHEMA_DIR = Path(__file__).resolve().parents[4] / "templates" / "\\$schema"
 
 
 def load_schema(name: str) -> dict[str, Any]:

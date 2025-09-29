@@ -1,7 +1,7 @@
 """SQLAlchemy models for DashMaster companion storage."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Optional
 
 from sqlalchemy import (
@@ -14,6 +14,12 @@ from sqlalchemy import (
     UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+
+def utcnow() -> datetime:
+    """Return a timezone-aware UTC timestamp."""
+
+    return datetime.now(UTC)
 
 
 class Base(DeclarativeBase):
@@ -33,10 +39,10 @@ class Device(Base):
     mqtt_topic: Mapped[str] = mapped_column(String(128), nullable=False)
     profile: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="unclaimed", nullable=False)
-    last_seen: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    last_seen: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
 
     birth: Mapped["DeviceBirth"] = relationship(
@@ -56,7 +62,7 @@ class DeviceBirth(Base):
     device_id: Mapped[int] = mapped_column(ForeignKey("devices.id"), nullable=False)
     json: Mapped[dict] = mapped_column(JSON, nullable=False)
     sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     device: Mapped[Device] = relationship(back_populates="birth")
 
@@ -77,7 +83,7 @@ class ConfigHistory(Base):
     theme_sha: Mapped[Optional[str]] = mapped_column(String(64))
     actor: Mapped[Optional[str]] = mapped_column(String(128))
     note: Mapped[Optional[str]] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     device: Mapped[Device] = relationship(back_populates="configs")
 

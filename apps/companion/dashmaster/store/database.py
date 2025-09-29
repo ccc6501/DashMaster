@@ -1,6 +1,7 @@
 """Database helpers for the companion service."""
 from __future__ import annotations
 
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator, Callable
@@ -10,7 +11,8 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from .models import Base
 
-_DB_PATH = Path(__file__).resolve().parents[2] / "var" / "companion.db"
+_DEFAULT_DB_PATH = Path(__file__).resolve().parents[4] / "var" / "companion.db"
+_DB_PATH = Path(os.getenv("DASHMASTER_DB_PATH", str(_DEFAULT_DB_PATH)))
 
 
 def ensure_db_dir() -> None:
@@ -23,6 +25,8 @@ ensure_db_dir()
 _ENGINE = create_engine(
     f"sqlite:///{_DB_PATH}", echo=False, future=True, connect_args={"check_same_thread": False}
 )
+
+ENGINE = _ENGINE
 
 SessionFactory = sessionmaker(bind=_ENGINE, expire_on_commit=False, class_=Session)
 

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from asyncio import to_thread
-from datetime import datetime
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import select
@@ -78,7 +78,7 @@ async def claim_device(payload: DeviceClaimRequest) -> DeviceClaimResponse:
                     )
             target.status = "claimed"
             target.profile = payload.profile
-            target.updated_at = datetime.utcnow()
+            target.updated_at = datetime.now(UTC)
             session.add(target)
             session.commit()
             return DeviceClaimResponse(
@@ -119,7 +119,7 @@ async def release_device(hostname: str) -> DeviceReleaseResponse:
                 )
             device.status = "unclaimed"
             device.profile = None
-            device.updated_at = datetime.utcnow()
+            device.updated_at = datetime.now(UTC)
             session.add(device)
             session.commit()
             return DeviceReleaseResponse(hostname=hostname, status=device.status)
