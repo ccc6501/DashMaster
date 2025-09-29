@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from ..core.events import bus
 from ..models.devices import (
@@ -17,6 +18,7 @@ from ..models.devices import (
 )
 from ..store.database import SessionFactory
 from ..store.models import Device
+from ..util.storage import iter_snapshots
 
 router = APIRouter(tags=["devices"])
 
@@ -27,7 +29,15 @@ async def list_devices() -> list[DeviceRef]:
 
     def _list() -> list[DeviceRef]:
         with SessionFactory() as session:
-            devices = session.execute(select(Device).order_by(Device.slot_index)).scalars().all()
+            stmt = (
+                select(Device)
+                .options(
+                    selectinload(Device.birth),
+                    selectinload(Device.configs),
+                )
+                .order_by(Device.slot_index)
+            )
+            devices = session.execute(stmt).scalars().all()
             return [
                 DeviceRef(
                     hostname=device.hostname,
@@ -38,6 +48,9 @@ async def list_devices() -> list[DeviceRef]:
                     status=device.status,
                     profile=device.profile,
                     last_seen=device.last_seen,
+                    last_upload_at=(device.configs[-1].created_at if device.configs else None),
+                    hashes=(device.birth.json.get("configs", {}) if device.birth else {}),
+                    snapshots=[path.name for path in iter_snapshots(device.hostname)],
                 )
                 for device in devices
             ]

@@ -16,6 +16,9 @@ class DeviceRef(BaseModel):
     status: str
     profile: Optional[str] = None
     last_seen: Optional[datetime] = None
+    last_upload_at: Optional[datetime] = None
+    hashes: dict[str, Optional[str]] = Field(default_factory=dict)
+    snapshots: list[str] = Field(default_factory=list)
 
     class Config:
         populate_by_name = True

@@ -7,33 +7,47 @@ from pathlib import Path
 from typing import AsyncIterator, Callable
 
 from sqlalchemy import create_engine
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from .models import Base
 
 _DEFAULT_DB_PATH = Path(__file__).resolve().parents[4] / "var" / "companion.db"
-_DB_PATH = Path(os.getenv("DASHMASTER_DB_PATH", str(_DEFAULT_DB_PATH)))
 
 
-def ensure_db_dir() -> None:
-    """Create parent directory for the SQLite database if needed."""
-    _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+def _resolve_engine() -> Engine:
+    url = os.getenv("DASHMASTER_DB_URL")
+    if url:
+        return create_engine(url, echo=False, future=True)
+
+    sqlite_path = Path(os.getenv("DASHMASTER_DB_PATH", str(_DEFAULT_DB_PATH)))
+    sqlite_path.parent.mkdir(parents=True, exist_ok=True)
+    return create_engine(
+        f"sqlite:///{sqlite_path}",
+        echo=False,
+        future=True,
+        connect_args={"check_same_thread": False},
+    )
 
 
-ensure_db_dir()
+ENGINE = _resolve_engine()
 
-_ENGINE = create_engine(
-    f"sqlite:///{_DB_PATH}", echo=False, future=True, connect_args={"check_same_thread": False}
-)
-
-ENGINE = _ENGINE
-
-SessionFactory = sessionmaker(bind=_ENGINE, expire_on_commit=False, class_=Session)
+SessionFactory = sessionmaker(bind=ENGINE, expire_on_commit=False, class_=Session)
 
 
 def init_db() -> None:
     """Initialise tables if they do not exist."""
-    Base.metadata.create_all(_ENGINE)
+    Base.metadata.create_all(ENGINE)
+
+
+def reset_engine() -> None:
+    """Recreate the SQLAlchemy engine from environment configuration."""
+
+    global ENGINE, SessionFactory
+    ENGINE.dispose()
+    ENGINE = _resolve_engine()
+    SessionFactory.configure(bind=ENGINE)
+    Base.metadata.create_all(ENGINE)
 
 
 @asynccontextmanager

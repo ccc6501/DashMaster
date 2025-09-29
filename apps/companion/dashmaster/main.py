@@ -6,8 +6,12 @@ from fastapi import FastAPI
 from .api.devices import router as devices_router
 from .api.upload import router as upload_router
 from .api.stream import router as stream_router
+from .api.actions import router as actions_router
+from .api.schema import router as schema_router
+from .api.ota import router as ota_router
 from .store.database import init_db, SessionFactory
 from .store.registry import seed_devices
+from .util.flags import FeatureFlags
 
 app = FastAPI(title="DashMaster Companion", version="0.1.0")
 
@@ -15,6 +19,7 @@ app = FastAPI(title="DashMaster Companion", version="0.1.0")
 @app.on_event("startup")
 def _startup() -> None:
     init_db()
+    app.state.flags = FeatureFlags.from_env()
     with SessionFactory() as session:
         seed_devices(session)
         session.commit()
@@ -23,6 +28,9 @@ def _startup() -> None:
 app.include_router(devices_router, prefix="/api")
 app.include_router(upload_router, prefix="/api")
 app.include_router(stream_router, prefix="/api")
+app.include_router(actions_router, prefix="/api")
+app.include_router(schema_router, prefix="/api")
+app.include_router(ota_router, prefix="/api")
 
 
 @app.get("/healthz")

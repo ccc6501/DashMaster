@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import os
 import shutil
 from asyncio import to_thread
 from dataclasses import dataclass
@@ -22,11 +21,9 @@ from ..store.database import SessionFactory
 from ..store.models import ConfigHistory, Device, DeviceBirth
 from ..util.hashing import sha256_bytes
 from ..util.schema import SchemaValidationError, validate
+from ..util.storage import device_storage_dir, iter_snapshots
 
 router = APIRouter(tags=["upload"])
-
-_DEFAULT_STORAGE_ROOT = Path(__file__).resolve().parents[4] / "var" / "device_storage"
-_STORAGE_ROOT = Path(os.getenv("DASHMASTER_STORAGE_ROOT", str(_DEFAULT_STORAGE_ROOT)))
 
 _ARTIFACT_ENDPOINTS: dict[str, tuple[str, str]] = {
     "layout.json": ("/api/layout", "application/json"),
@@ -45,6 +42,8 @@ _CONFIG_HASH_KEYS: dict[str, str] = {
     "board_map.json": "board_map",
     "theme.css": "theme",
 }
+
+_CONFIG_KEYS = ["layout", "rules", "schema", "calibration", "board_map", "theme"]
 
 
 @dataclass(slots=True)
@@ -79,6 +78,7 @@ class RollbackResponse(BaseModel):
     device: str
     rollback: str
     hashes: dict[str, str | None]
+    diff: dict[str, bool]
 
 
 async def _read_json(file: UploadFile, *, schema_name: str) -> tuple[dict[str, Any], str]:
@@ -112,13 +112,6 @@ async def _read_text(file: UploadFile) -> tuple[str, str]:
         ) from exc
     digest = sha256_bytes(raw)
     return text, digest
-
-
-def _ensure_storage_dir(hostname: str) -> Path:
-    target = _STORAGE_ROOT / hostname
-    target.mkdir(parents=True, exist_ok=True)
-    return target
-
 
 @router.post("/upload/{hostname}")
 async def upload_config_pack(
@@ -165,7 +158,8 @@ async def upload_config_pack(
 
     device_info = await to_thread(_get_device_info, hostname)
 
-    storage_dir = await to_thread(_ensure_storage_dir, hostname)
+    storage_dir = await to_thread(device_storage_dir, hostname)
+    previous_hashes = await to_thread(_collect_hashes_from_storage, storage_dir)
 
     files_to_write: dict[str, bytes] = {
         "layout.json": json.dumps(layout_json, indent=2).encode("utf-8"),
@@ -202,7 +196,7 @@ async def upload_config_pack(
         set(files_to_write.keys()),
     )
 
-    storage_dir = await to_thread(_ensure_storage_dir, hostname)
+    storage_dir = await to_thread(device_storage_dir, hostname)
 
     await to_thread(
         _write_files,
@@ -218,6 +212,7 @@ async def upload_config_pack(
         "board_map": board_map_sha,
         "theme": theme_sha,
     }
+    diff = _compute_diff(previous_hashes, hashes)
 
     result = await to_thread(
         _record_history_and_birth,
@@ -226,8 +221,15 @@ async def upload_config_pack(
         actor,
         json.dumps({"rollback": snapshot_label}) if snapshot_label else None,
     )
-    await bus.publish("config.uploaded", {"hostname": hostname, **result["hashes"]})
-    return result
+    payload = {
+        "hostname": hostname,
+        "hashes": hashes,
+        "diff": diff,
+        "snapshot": snapshot_label,
+        "actor": actor,
+    }
+    await bus.publish("config.uploaded", payload)
+    return {**result, "diff": diff, "snapshot": snapshot_label}
 
 
 def _write_files(target: Path, files: dict[str, bytes]) -> None:
@@ -357,19 +359,28 @@ def _record_history_and_birth(
 
 
 def _collect_hashes_from_files(files: dict[str, bytes]) -> dict[str, str | None]:
-    hashes: dict[str, str | None] = {
-        "layout": None,
-        "rules": None,
-        "schema": None,
-        "calibration": None,
-        "board_map": None,
-        "theme": None,
-    }
+    hashes: dict[str, str | None] = {key: None for key in _CONFIG_KEYS}
     for filename, content in files.items():
         key = _CONFIG_HASH_KEYS.get(filename)
         if key is not None:
             hashes[key] = sha256_bytes(content)
     return hashes
+
+
+def _collect_hashes_from_storage(storage_dir: Path) -> dict[str, str | None]:
+    hashes: dict[str, str | None] = {key: None for key in _CONFIG_KEYS}
+    for filename, key in _CONFIG_HASH_KEYS.items():
+        path = storage_dir / filename
+        if path.exists():
+            hashes[key] = sha256_bytes(path.read_bytes())
+    return hashes
+
+
+def _compute_diff(
+    previous: dict[str, str | None],
+    current: dict[str, str | None],
+) -> dict[str, bool]:
+    return {key: previous.get(key) != current.get(key) for key in _CONFIG_KEYS}
 
 
 def _load_snapshot_files(snapshot_dir: Path) -> dict[str, bytes]:
@@ -418,7 +429,7 @@ async def rollback_config_pack(
 
     payload = payload or RollbackRequest()
 
-    storage_dir = await to_thread(_ensure_storage_dir, hostname)
+    storage_dir = await to_thread(device_storage_dir, hostname)
     history_dir = storage_dir / "history"
     if not history_dir.exists():
         raise HTTPException(
@@ -432,6 +443,8 @@ async def rollback_config_pack(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="No rollback snapshots available",
         )
+
+    previous_hashes = await to_thread(_collect_hashes_from_storage, storage_dir)
 
     snapshot_dir: Path
     if payload.snapshot:
@@ -465,6 +478,7 @@ async def rollback_config_pack(
     await to_thread(_overwrite_storage_from_snapshot, storage_dir, snapshot_files)
 
     hashes = await to_thread(_collect_hashes_from_files, snapshot_files)
+    diff = _compute_diff(previous_hashes, hashes)
 
     result = await to_thread(
         _record_history_and_birth,
@@ -476,12 +490,19 @@ async def rollback_config_pack(
 
     await bus.publish(
         "config.rollback",
-        {"hostname": hostname, "snapshot": snapshot_dir.name, **result["hashes"]},
+        {
+            "hostname": hostname,
+            "snapshot": snapshot_dir.name,
+            "hashes": hashes,
+            "diff": diff,
+            "actor": payload.actor,
+        },
     )
     return RollbackResponse(
         device=result["device"],
         rollback=snapshot_dir.name,
         hashes=result["hashes"],
+        diff=diff,
     )
 
 
@@ -489,5 +510,5 @@ async def rollback_config_pack(
 async def list_snapshots(hostname: str) -> list[RollbackSnapshot]:
     """Return available rollback snapshots for a device."""
 
-    storage_dir = await to_thread(_ensure_storage_dir, hostname)
+    storage_dir = await to_thread(device_storage_dir, hostname)
     return await to_thread(_gather_snapshots, storage_dir)

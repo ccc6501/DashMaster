@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import queue
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -15,14 +17,15 @@ os.environ.setdefault("DASHMASTER_DB_PATH", str((_TEST_VAR_ROOT / "companion.db"
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from httpx import AsyncClient
 from sqlalchemy import select
 
 from ..core.events import bus
 from ..core.http_client import DeviceClient
 from ..main import app
-from ..store.database import ENGINE, SessionFactory
+from ..store.database import ENGINE, SessionFactory, reset_engine
 from ..store.models import ConfigHistory, DeviceBirth
-from .device_emulator import app as emulator_app
+from .device_emulator import ACTION_LOG, app as emulator_app, reset_actions
 
 VAR_ROOT = Path(os.environ["DASHMASTER_STORAGE_ROOT"]).parent
 STORAGE_DIR = Path(os.environ["DASHMASTER_STORAGE_ROOT"])
@@ -38,10 +41,14 @@ def reset_state() -> None:
         shutil.rmtree(VAR_ROOT)
     if EMU_STORAGE.exists():
         shutil.rmtree(EMU_STORAGE)
+    if DB_PATH.exists():
+        DB_PATH.unlink()
+    reset_engine()
     EMU_STORAGE.mkdir(parents=True, exist_ok=True)
     VAR_ROOT.mkdir(parents=True, exist_ok=True)
     STORAGE_DIR.mkdir(parents=True, exist_ok=True)
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    reset_actions()
 
 
 @pytest.fixture(autouse=True)
@@ -61,14 +68,20 @@ def patch_device_client(monkeypatch: pytest.MonkeyPatch):
         "apps.companion.dashmaster.api.upload.create_device_client",
         _factory,
     )
+    monkeypatch.setattr(
+        "apps.companion.dashmaster.api.actions.create_device_client",
+        _factory,
+    )
 
 
 @pytest.fixture
 def captured_events(monkeypatch: pytest.MonkeyPatch):
     events: list[tuple[str, dict[str, object]]] = []
+    original_publish = bus.publish
 
     async def capture(event_type: str, payload: dict[str, object]) -> None:
         events.append((event_type, payload))
+        await original_publish(event_type, payload)
 
     monkeypatch.setattr(bus, "publish", capture)
     return events
@@ -100,6 +113,9 @@ def test_upload_happy_path(client: TestClient, captured_events) -> None:
     payload = response.json()
     assert payload["device"] == "esp-000"
     assert set(payload["hashes"].keys()) == {"layout", "rules", "schema", "calibration", "board_map", "theme"}
+    assert payload["snapshot"] is None
+    assert payload["diff"]["layout"] is True
+    assert payload["diff"]["rules"] is True
 
     device_storage = STORAGE_DIR / "esp-000"
     assert json.loads((device_storage / "layout.json").read_text(encoding="utf-8")) == layout
@@ -117,20 +133,20 @@ def test_upload_happy_path(client: TestClient, captured_events) -> None:
         assert birth.json["configs"]["layout"] == payload["hashes"]["layout"]
         assert len(birth.sha256) == 64
 
-    assert captured_events == [
-        (
-            "config.uploaded",
-            {
-                "hostname": "esp-000",
-                "layout": payload["hashes"]["layout"],
-                "rules": payload["hashes"]["rules"],
-                "schema": payload["hashes"]["schema"],
-                "calibration": payload["hashes"]["calibration"],
-                "board_map": payload["hashes"]["board_map"],
-                "theme": payload["hashes"]["theme"],
-            },
-        )
-    ]
+    assert len(captured_events) == 1
+    event_type, event_payload = captured_events[0]
+    assert event_type == "config.uploaded"
+    assert event_payload["hostname"] == "esp-000"
+    assert event_payload["hashes"]["layout"] == payload["hashes"]["layout"]
+    assert event_payload["diff"]["layout"] is True
+    assert event_payload["snapshot"] is None
+    assert event_payload["actor"] == "tester"
+
+    devices_response = client.get("/api/devices")
+    device_entries = devices_response.json()
+    entry = next(item for item in device_entries if item["hostname"] == "esp-000")
+    assert entry["hashes"]["layout"] == payload["hashes"]["layout"]
+    assert entry["snapshots"] == []
 
 
 def test_upload_rejects_missing_ttl(client: TestClient) -> None:
@@ -209,6 +225,7 @@ def test_rollback_restores_previous_snapshot(client: TestClient, captured_events
     rollback_payload = rollback.json()
     assert rollback_payload["device"] == "esp-000"
     assert rollback_payload["rollback"] == snapshots[0].name
+    assert rollback_payload["diff"]["layout"] is True
 
     device_storage = STORAGE_DIR / "esp-000"
     restored_layout = json.loads((device_storage / "layout.json").read_text(encoding="utf-8"))
@@ -236,6 +253,10 @@ def test_rollback_restores_previous_snapshot(client: TestClient, captured_events
         "config.uploaded",
         "config.rollback",
     ]
+    rollback_event = captured_events[-1][1]
+    assert rollback_event["snapshot"] == rollback_payload["rollback"]
+    assert rollback_event["diff"]["layout"] is True
+    assert rollback_event.get("actor") == "operator"
 
     post_list = client.get("/api/upload/esp-000/snapshots")
     assert post_list.status_code == 200
@@ -243,6 +264,11 @@ def test_rollback_restores_previous_snapshot(client: TestClient, captured_events
     assert len(post_listing) == 2
     names = [entry["name"] for entry in post_listing]
     assert snapshots[0].name in names
+
+    devices_response = client.get("/api/devices")
+    devices_payload = devices_response.json()
+    entry = next(item for item in devices_payload if item["hostname"] == "esp-000")
+    assert len(entry["snapshots"]) >= 2
 
 
 def test_rollback_requires_snapshot(client: TestClient) -> None:
@@ -266,3 +292,35 @@ def test_rollback_requires_snapshot(client: TestClient) -> None:
 
     rollback = client.post("/api/upload/esp-000/rollback")
     assert rollback.status_code == 404
+
+
+
+def test_stream_emits_upload_event(client: TestClient) -> None:
+    layout = _load_template("layout.json")
+    rules = _load_template("rules.json")
+    events: queue.Queue[dict[str, object]] = queue.Queue()
+
+    def reader() -> None:
+        with client.stream("GET", "/api/stream") as stream:
+            for line in stream.iter_lines():
+                if line.startswith("data: "):
+                    events.put(json.loads(line[6:]))
+                    return
+
+    thread = threading.Thread(target=reader, daemon=True)
+    thread.start()
+
+    response = client.post(
+        "/api/upload/esp-000",
+        data={"actor": "stream"},
+        files={
+            "layout": ("layout.json", json.dumps(layout), "application/json"),
+            "rules": ("rules.json", json.dumps(rules), "application/json"),
+        },
+    )
+    assert response.status_code == 200
+    thread.join(timeout=5)
+    assert not thread.is_alive(), "SSE stream thread did not finish"
+    payload = events.get_nowait()
+    assert payload["hostname"] == "esp-000"
+    assert payload["hashes"]["layout"] is not None

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Mapping
 
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -40,6 +40,10 @@ class DeviceClient:
             content=payload,
             headers={"Content-Type": content_type},
         )
+
+    @retry(wait=wait_exponential(multiplier=0.5, min=0.5, max=4), stop=stop_after_attempt(3))
+    async def post(self, path: str, *, params: Mapping[str, Any] | None = None) -> httpx.Response:
+        return await self._client.post(path, params=params)
 
     @retry(wait=wait_exponential(multiplier=0.5, min=0.5, max=4), stop=stop_after_attempt(3))
     async def get(self, path: str) -> httpx.Response:

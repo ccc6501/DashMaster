@@ -25,6 +25,7 @@ _STATUS = {
 
 _SCHEMA = {"version": "1.0", "sensors": []}
 _STATE = {"temp": 23.4}
+ACTION_LOG: list[tuple[str, dict[str, object]]] = []
 
 
 @app.get("/api/status")
@@ -56,6 +57,24 @@ async def rules(request: Request) -> Response:
     return Response(status_code=200)
 
 
+@app.post("/api/identify")
+async def identify(minutes: int = 5) -> JSONResponse:
+    ACTION_LOG.append(("identify", {"minutes": minutes}))
+    return JSONResponse({"status": "ok"})
+
+
+@app.post("/api/reboot")
+async def reboot() -> JSONResponse:
+    ACTION_LOG.append(("reboot", {}))
+    return JSONResponse({"status": "ok"})
+
+
+@app.post("/api/factory_reset")
+async def factory_reset() -> JSONResponse:
+    ACTION_LOG.append(("factory_reset", {}))
+    return JSONResponse({"status": "ok"})
+
+
 @app.get("/api/stream")
 async def stream() -> EventSourceResponse:
     async def generator():
@@ -68,3 +87,7 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run(app, host="0.0.0.0", port=18080)
+
+
+def reset_actions() -> None:
+    ACTION_LOG.clear()
