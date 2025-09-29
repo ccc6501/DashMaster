@@ -1,0 +1,8 @@
+{
+  "device_id": "esp-000",
+  "hardware_rev": "dev",
+  "firmware": {
+    "version": "0.1.0"
+  },
+  "configs": {}
+}

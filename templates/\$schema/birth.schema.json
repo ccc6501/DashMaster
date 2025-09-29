@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["device_id", "firmware"],
+  "properties": {
+    "device_id": {"type": "string"},
+    "hardware_rev": {"type": "string"},
+    "firmware": {
+      "type": "object",
+      "required": ["version"],
+      "properties": {
+        "version": {"type": "string"}
+      }
+    },
+    "configs": {"type": "object"}
+  }
+}

@@ -1,0 +1,30 @@
+version: "3.9"
+
+services:
+  traefik:
+    image: traefik:v3.0
+    command:
+      - "--providers.file.filename=/dynamic.yml"
+      - "--entrypoints.web.address=:80"
+    ports:
+      - "80:80"
+    volumes:
+      - ../apps/proxy/traefik/traefik.yml:/traefik.yml:ro
+      - ../apps/proxy/traefik/dynamic.yml:/dynamic.yml:ro
+
+  companion:
+    build: ../apps/companion
+    environment:
+      - DASHMASTER_DB_URL=sqlite:////data/companion.db
+    volumes:
+      - companion-data:/data
+    ports:
+      - "5055:5055"
+
+  web:
+    build: ../apps/web
+    ports:
+      - "3000:3000"
+
+volumes:
+  companion-data:

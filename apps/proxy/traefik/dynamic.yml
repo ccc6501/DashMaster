@@ -1,0 +1,17 @@
+http:
+  routers:
+    companion:
+      rule: "Host(`dash.local`) && PathPrefix(`/api`)"
+      service: companion
+    web:
+      rule: "Host(`dash.local`)"
+      service: web
+  services:
+    companion:
+      loadBalancer:
+        servers:
+          - url: "http://companion:5055"
+    web:
+      loadBalancer:
+        servers:
+          - url: "http://web:3000"

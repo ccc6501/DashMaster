@@ -1,0 +1,18 @@
+{
+  "devices": [
+    {
+      "slot_index": 0,
+      "hostname": "esp-000",
+      "http_port": 8100,
+      "admin_port": 8200,
+      "mqtt_topic": "devices/esp-000"
+    },
+    {
+      "slot_index": 1,
+      "hostname": "esp-001",
+      "http_port": 8101,
+      "admin_port": 8201,
+      "mqtt_topic": "devices/esp-001"
+    }
+  ]
+}
